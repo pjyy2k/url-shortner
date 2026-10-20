@@ -98,7 +98,8 @@ async function handle(request: Request, env: Env): Promise<Response> {
   if (!['GET', 'HEAD'].includes(request.method)) return new Response('Method not allowed', { status: 405, headers: { ...SECURITY, Allow: 'GET, HEAD' } });
   if (['/', '/admin', '/admin/', '/app.js', '/style.css'].includes(path)) {
     const assetURL = new URL(request.url);
-    if (['/', '/admin', '/admin/'].includes(path)) assetURL.pathname = '/index.html';
+    // Use the canonical directory URL: ASSETS redirects /index.html to /.
+    if (['/', '/admin', '/admin/'].includes(path)) assetURL.pathname = '/';
     const asset = await env.ASSETS.fetch(new Request(assetURL, request));
     const response = new Response(request.method === 'HEAD' ? null : asset.body, asset);
     for (const [key, value] of Object.entries(SECURITY)) response.headers.set(key, value);
