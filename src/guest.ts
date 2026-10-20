@@ -1,8 +1,10 @@
+import { allocateLink } from './links.ts';
+import type { AllocatorEnv, Link } from './links.ts';
 interface State {
   blockConcurrencyWhile<T>(callback: () => Promise<T>): Promise<T>;
   storage: { get<T>(key: string): Promise<T | undefined>; put(key: string, value: unknown): Promise<void> };
 }
-interface Env { LINKS: { put(key: string, value: string, options: { expiration: number; metadata: unknown }): Promise<void> } }
+interface Env extends AllocatorEnv { LINKS: { put(key: string, value: string, options: { expiration: number; metadata: unknown }): Promise<void> } }
 interface Daily { date: string; count: number }
 // One named Object for the whole service, not one Object per IP or user.
 export class GuestQuota {
@@ -22,12 +24,9 @@ export class GuestQuota {
       if (daily.count >= 100) return Response.json({ error: '오늘의 게스트 생성 한도 100개에 도달했습니다. 한국시간 자정 이후 다시 이용하세요.' }, { status: 429 });
       // Reserve durably before writing KV. An uncertain failed write never allows an overshoot.
       await this.state.storage.put('daily', { date, count: daily.count + 1 });
-      const bytes = crypto.getRandomValues(new Uint8Array(12));
-      const code = btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_');
       const expiresAt = Math.floor(now / 1000) + 7 * 24 * 60 * 60;
-      const link = { url: target, createdAt: new Date(now).toISOString(), expiresAt, createdBy: 'guest' };
-      await this.env.LINKS.put(`link:${code}`, JSON.stringify(link), { expiration: expiresAt, metadata: { createdAt: link.createdAt, expiresAt, createdBy: 'guest' } });
-      return Response.json({ code, ...link }, { status: 201 });
+      const link: Link = { url: target, createdAt: new Date(now).toISOString(), expiresAt, createdBy: 'guest' };
+      return allocateLink(this.env, link);
     });
   }
 }

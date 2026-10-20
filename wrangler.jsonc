@@ -47,6 +47,10 @@
       {
         "name": "GUEST_QUOTA",
         "class_name": "GuestQuota"
+      },
+      {
+        "name": "CODE_ALLOCATOR",
+        "class_name": "CodeAllocator"
       }
     ]
   },
@@ -56,6 +60,12 @@
       "new_sqlite_classes": [
         "SetupGate",
         "GuestQuota"
+      ]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": [
+        "CodeAllocator"
       ]
     }
   ]

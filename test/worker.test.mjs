@@ -1,3 +1,4 @@
+import { attachAllocator } from './helpers.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import worker from '../src/index.ts';
@@ -26,6 +27,7 @@ function setup() {
       return new Response('<html>Login</html>', { headers: { 'Content-Type': 'text/html' } });
     } },
   };
+  attachAllocator(env);
   const request = (path, { authenticated = true, method = 'GET', body, headers = {} } = {}) => worker.fetch(new Request(`https://short.example${path}`, { method, headers: { ...(authenticated ? { Cookie: session } : {}), ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}), ...headers }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) }), env);
   const create = (body = { url: 'https://example.org/path?q=한글' }) => request('/api/links', { method: 'POST', body });
   return { env, store, request, create, reads: () => reads };
@@ -45,7 +47,7 @@ test('invalid cookie fails closed; unconfigured credentials require first setup'
 });
 test('create → anonymous redirect → list → delete → not found', async () => {
   const s = setup(); const response = await s.create(); assert.equal(response.status, 201);
-  const link = await response.json(); assert.match(link.code, /^[A-Za-z0-9_-]{16}$/);
+  const link = await response.json(); assert.equal(link.code, 'a');
   assert.equal(s.store.size, 2);
   assert.ok(Buffer.byteLength(JSON.stringify(s.store.get(`link:${link.code}`).metadata)) < 1024);
   const redirect = await s.request(`/${link.code}`, { authenticated: false });
@@ -98,7 +100,7 @@ test('public shell has security headers and no secrets, invalid routes skip KV',
   for (const path of ['/', '/admin', '/admin/']) {
     const response = await s.request(path, { authenticated: false }); assert.equal(response.status, 200); assert.equal(response.headers.get('X-Frame-Options'), 'DENY'); assert.ok(!((await response.text()).includes(TOKEN)));
   }
-  for (const path of ['/nope', '/abc/def', '/robots.txt']) assert.equal((await s.request(path, { authenticated: false })).status, 404);
+  for (const path of ['/nope!', '/abc/def', '/robots.txt']) assert.equal((await s.request(path, { authenticated: false })).status, 404);
   assert.equal(s.reads(), 0);
   assert.equal((await s.request('/abcdefghijklmnop', { authenticated: false, method: 'POST' })).status, 405);
 });

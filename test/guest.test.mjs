@@ -1,3 +1,4 @@
+import { attachAllocator } from './helpers.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import worker from '../src/index.ts';
@@ -10,6 +11,7 @@ function setup() {
     async list() {lists++;return {keys:[],list_complete:true};},
   }};
   const state = { storage: {async get(key){return persistent.get(key);},async put(key,value){persistent.set(key,value);}},blockConcurrencyWhile(callback){const result=queue.then(callback);queue=result.catch(()=>{});return result;} };
+  attachAllocator(env);
   let quota = new GuestQuota(state,env);
   env.GUEST_QUOTA={idFromName(name){assert.equal(name,'all-guests-global-daily');return name;},get(){return quota;}};
   const request=(body={url:'https://example.org'},method='POST',headers={})=>worker.fetch(new Request('https://short.example/api/guest/links',{method,headers:{'Content-Type':'application/json',...headers},...(['GET','HEAD'].includes(method)?{}:{body:JSON.stringify(body)})}),env);

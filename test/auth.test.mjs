@@ -1,3 +1,4 @@
+import { attachAllocator } from './helpers.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import worker from '../src/index.ts';
@@ -15,6 +16,7 @@ function setup() {
       return { keys: entries.slice(offset,offset+limit).map(([name,v]) => ({ name,metadata:v.metadata })), list_complete: offset+limit>=entries.length, cursor: String(offset+limit) };
     },
   }, ASSETS: {async fetch() {return new Response('Login');}} };
+  attachAllocator(env);
   const request = (path, options = {}) => {
     const { method = 'GET', body, cookie, bearer, origin } = options;
     return worker.fetch(new Request(`https://short.example${path}`, { method, headers: { ...(cookie?{Cookie:cookie}:{}), ...(bearer?{Authorization:`Bearer ${bearer}`} : {}), ...(body?{'Content-Type':'application/json'}:{}), ...(origin?{Origin:origin}:{}) }, ...(body?{body:JSON.stringify(body)}:{}) }),env);

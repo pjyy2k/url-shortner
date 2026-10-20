@@ -1,15 +1,18 @@
+import { allocateLink } from './links.ts';
+import type { Link, AllocatorEnv } from './links.ts';
 import { credentials, checkPassword, changePassword, sessionCookie, validSession, clearCookie, newApiKey, apiKeyHash, validApiKey } from './auth.ts';
 export { SetupGate } from './setup.ts';
 export { GuestQuota } from './guest.ts';
-interface Link { url: string; createdAt: string; expiresAt: number | null; createdBy?: 'guest' | 'admin' }
+export { CodeAllocator } from './codes.ts';
+
 interface KV {
   get<T = Link>(key: string, type: 'json'): Promise<T | null>;
   put(key: string, value: string, options?: { metadata?: unknown; expiration?: number }): Promise<void>;
   delete(key: string): Promise<void>;
   list<T = Omit<Link, 'url'>>(options: { prefix: string; limit: number; cursor?: string }): Promise<{ keys: { name: string; metadata?: T }[]; list_complete: boolean; cursor?: string }>;
 }
-interface Env { LINKS: KV; GUEST_QUOTA?: { idFromName(name: string): unknown; get(id: unknown): { fetch(request: Request): Promise<Response> } }; SETUP_GATE?: { idFromName(name: string): unknown; get(id: unknown): { fetch(request: Request): Promise<Response> } }; GUEST_RATE_LIMITER?: { limit(options: { key: string }): Promise<{ success: boolean }> }; LOGIN_RATE_LIMITER?: { limit(options: { key: string }): Promise<{ success: boolean }> }; ASSETS: { fetch(request: Request): Promise<Response> } }
-const CODE = /^[A-Za-z0-9_-]{16}$/;
+interface Env extends AllocatorEnv { LINKS: KV; GUEST_QUOTA?: { idFromName(name: string): unknown; get(id: unknown): { fetch(request: Request): Promise<Response> } }; SETUP_GATE?: { idFromName(name: string): unknown; get(id: unknown): { fetch(request: Request): Promise<Response> } }; GUEST_RATE_LIMITER?: { limit(options: { key: string }): Promise<{ success: boolean }> }; LOGIN_RATE_LIMITER?: { limit(options: { key: string }): Promise<{ success: boolean }> }; ASSETS: { fetch(request: Request): Promise<Response> } }
+const CODE = /^(?:[A-Za-z0-9]{1,9}|[A-Za-z0-9_-]{16})$/;
 const SECURITY = {
   'Cache-Control': 'no-store',
   'X-Content-Type-Options': 'nosniff',
@@ -44,10 +47,6 @@ function safeTarget(value: unknown, origin: URL): string | null {
     if (!['http:', 'https:'].includes(target.protocol) || target.username || target.password || target.hostname === origin.hostname) return null;
     return target.href.length <= 4096 ? target.href : null;
   } catch { return null; }
-}
-function newCode() {
-  const bytes = crypto.getRandomValues(new Uint8Array(12));
-  return btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_');
 }
 async function handle(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
@@ -153,12 +152,10 @@ async function handle(request: Request, env: Env): Promise<Response> {
         if (!Number.isFinite(expiresAt) || expiresAt < Math.floor(Date.now() / 1000) + 60) return json({ error: '만료일은 현재보다 1분 이상 이후여야 합니다.' }, 400);
       }
       const link: Link = { url: target, createdAt: new Date().toISOString(), expiresAt, createdBy: 'admin' };
-      // 96 random bits: no shared sequence or read-then-write uniqueness assumption.
-      const code = newCode();
-      await env.LINKS.put(`link:${code}`, JSON.stringify(link), { metadata: { createdAt: link.createdAt, expiresAt }, ...(expiresAt ? { expiration: expiresAt } : {}) });
-      return json({ code, ...link }, 201);
+      const result = await allocateLink(env, link);
+      return json(await result.json(), result.status);
     }
-    const deletion = path.match(/^\/api\/links\/([A-Za-z0-9_-]{16})$/);
+    const deletion = path.match(/^\/api\/links\/([A-Za-z0-9]{1,9}|[A-Za-z0-9_-]{16})$/);
     if (deletion && request.method === 'DELETE') {
       await env.LINKS.delete(`link:${deletion[1]}`);
       return json({ ok: true });
