@@ -39,6 +39,15 @@ async function api(path, options = {}) {
     if (response.status === 401 && path !== '/api/auth/login') showLogin(); throw new Error(data.error || '요청을 처리하지 못했습니다.'); }
   return data;
 }
+function normalizeUrlField(field) {
+  let value = field.value.trim();
+  if (!value) return value;
+  if (value.startsWith('//')) value = `https:${value}`;
+  else if (!/^[a-z][a-z0-9+.-]*:/i.test(value) || /^[^/?#:\s]+:\d+(?:[/?#]|$)/.test(value)) value = `https://${value}`;
+  field.value = value;
+  return value;
+}
+for (const id of ['url', 'guest-url']) $(id).addEventListener('blur', () => normalizeUrlField($(id)));
 function shortURL(code) { return `${location.origin}/${code}`; }
 async function copy(text, label = '링크') { try { await navigator.clipboard.writeText(text); notice(`${label}를 복사했습니다.`); } catch { notice('자동 복사를 사용할 수 없습니다. 표시된 값을 직접 선택해 복사하세요.', true); } }
 function render() {
@@ -115,7 +124,7 @@ $('create').onsubmit = async event => {
   event.preventDefault(); const button = event.submitter; button.disabled = true; const current = revision;
   try {
     const expiry = $('expires').value;
-    const data = await api('/api/links', { method: 'POST', body: JSON.stringify({ url: $('url').value.trim(), expiresAt: expiry ? new Date(expiry).toISOString() : null }) });
+    const data = await api('/api/links', { method: 'POST', body: JSON.stringify({ url: normalizeUrlField($('url')), customCode: $('custom-code').value.trim(), expiresAt: expiry ? new Date(expiry).toISOString() : null }) });
     if (current !== revision) return;
     resultURL = shortURL(data.code); $('result-link').href = resultURL; $('result-link').textContent = resultURL; $('result').hidden = false;
     records.unshift(data); render(); $('create').reset(); notice('생성되었습니다. 링크가 바로 열리지 않으면 잠시 후 다시 시도하세요.');
@@ -195,7 +204,7 @@ $('more-keys').onclick = () => loadKeys().catch(e => notice(e.message,true));
 $('guest-create').onsubmit = async event => {
   event.preventDefault(); const button = event.submitter; button.disabled = true;
   try {
-    const created = await api('/api/guest/links', { method: 'POST', body: JSON.stringify({ url: $('guest-url').value.trim() }) });
+    const created = await api('/api/guest/links', { method: 'POST', body: JSON.stringify({ url: normalizeUrlField($('guest-url')) }) });
     guestResultURL = shortURL(created.code); $('guest-result-link').href = guestResultURL; $('guest-result-link').textContent = guestResultURL;
     $('guest-expiry').textContent = `만료: ${new Date(created.expiresAt * 1000).toLocaleString('ko-KR')}`;
     $('guest-result').hidden = false; $('guest-create').reset(); notice('7일 동안 사용할 수 있는 링크를 만들었습니다.');

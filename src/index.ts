@@ -1,3 +1,4 @@
+import { LINK_CODE } from './code-format.ts';
 import { allocateLink } from './links.ts';
 import type { Link, AllocatorEnv } from './links.ts';
 import { credentials, checkPassword, changePassword, sessionCookie, validSession, clearCookie, newApiKey, apiKeyHash, validApiKey } from './auth.ts';
@@ -12,7 +13,7 @@ interface KV {
   list<T = Omit<Link, 'url'>>(options: { prefix: string; limit: number; cursor?: string }): Promise<{ keys: { name: string; metadata?: T }[]; list_complete: boolean; cursor?: string }>;
 }
 interface Env extends AllocatorEnv { LINKS: KV; GUEST_QUOTA?: { idFromName(name: string): unknown; get(id: unknown): { fetch(request: Request): Promise<Response> } }; SETUP_GATE?: { idFromName(name: string): unknown; get(id: unknown): { fetch(request: Request): Promise<Response> } }; GUEST_RATE_LIMITER?: { limit(options: { key: string }): Promise<{ success: boolean }> }; LOGIN_RATE_LIMITER?: { limit(options: { key: string }): Promise<{ success: boolean }> }; ASSETS: { fetch(request: Request): Promise<Response> } }
-const CODE = /^(?:[A-Za-z0-9]{1,9}|[A-Za-z0-9_-]{16})$/;
+const CODE = LINK_CODE;
 const SECURITY = {
   'Cache-Control': 'no-store',
   'X-Content-Type-Options': 'nosniff',
@@ -40,10 +41,22 @@ async function readBody(request: Request) {
   for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
   return JSON.parse(new TextDecoder().decode(bytes));
 }
-function safeTarget(value: unknown, origin: URL): string | null {
+function safeTarget(value: unknown, origin: URL, implicitHttps = false): string | null {
   if (typeof value !== 'string' || value.length > 4096) return null;
   try {
-    const target = new URL(value);
+    let input = value.trim();
+    if (/[\u0000-\u001F\u007F\\]/.test(input)) return null;
+    let addedScheme = false;
+    if (implicitHttps && !/^https?:\/\//i.test(input)) {
+      if (input.startsWith('//')) input = `https:${input}`;
+      else {
+        if (/^[a-z][a-z0-9+.-]*:/i.test(input) && !/^[^/?#:\s]+:\d+(?:[/?#]|$)/.test(input)) return null;
+        input = `https://${input}`;
+      }
+      addedScheme = true;
+    }
+    const target = new URL(input);
+    if (addedScheme && ((!target.hostname.includes('.') && target.hostname !== 'localhost' && !target.hostname.startsWith('[')) || /^\.+$/.test(target.hostname))) return null;
     if (!['http:', 'https:'].includes(target.protocol) || target.username || target.password || target.hostname === origin.hostname) return null;
     return target.href.length <= 4096 ? target.href : null;
   } catch { return null; }
@@ -63,7 +76,7 @@ async function handle(request: Request, env: Env): Promise<Response> {
       if (!(request.headers.get('Content-Type') || '').toLowerCase().startsWith('application/json')) return json({ error: 'JSON 요청이 필요합니다.' }, 415);
       let body;
       try { body = await readBody(request); } catch { return json({ error: '요청 형식이 잘못되었거나 너무 큽니다.' }, 400); }
-      const target = safeTarget(body?.url, url);
+      const target = safeTarget(body?.url, url, true);
       if (!target) return json({ error: '유효한 외부 HTTP/HTTPS URL을 입력하세요.' }, 400);
       if (!env.GUEST_QUOTA) return json({ error: '게스트 생성 기능을 배포해 주세요.' }, 503);
       const quota = env.GUEST_QUOTA.get(env.GUEST_QUOTA.idFromName('all-guests-global-daily'));
@@ -143,7 +156,7 @@ async function handle(request: Request, env: Env): Promise<Response> {
       if (!(request.headers.get('Content-Type') || '').toLowerCase().startsWith('application/json')) return json({ error: 'JSON 요청이 필요합니다.' }, 415);
       let body;
       try { body = await readBody(request); } catch { return json({ error: '요청 형식이 잘못되었거나 너무 큽니다.' }, 400); }
-      const target = safeTarget(body?.url, url);
+      const target = safeTarget(body?.url, url, true);
       if (!target) return json({ error: '유효한 외부 HTTP/HTTPS URL을 입력하세요. 인증정보가 포함된 URL은 허용되지 않습니다.' }, 400);
       let expiresAt: number | null = null;
       if (body.expiresAt !== null && body.expiresAt !== undefined && body.expiresAt !== '') {
@@ -152,11 +165,13 @@ async function handle(request: Request, env: Env): Promise<Response> {
         if (!Number.isFinite(expiresAt) || expiresAt < Math.floor(Date.now() / 1000) + 60) return json({ error: '만료일은 현재보다 1분 이상 이후여야 합니다.' }, 400);
       }
       const link: Link = { url: target, createdAt: new Date().toISOString(), expiresAt, createdBy: 'admin' };
-      const result = await allocateLink(env, link);
+      if (body.customCode !== undefined && body.customCode !== null && typeof body.customCode !== 'string') return json({ error: '단축 코드를 문자열로 입력하세요.' }, 400);
+      const customCode = typeof body.customCode === 'string' ? body.customCode.trim() : undefined;
+      const result = await allocateLink(env, link, customCode);
       return json(await result.json(), result.status);
     }
-    const deletion = path.match(/^\/api\/links\/([A-Za-z0-9]{1,9}|[A-Za-z0-9_-]{16})$/);
-    if (deletion && request.method === 'DELETE') {
+    const deletion = path.match(/^\/api\/links\/([^/]+)$/);
+    if (deletion && CODE.test(deletion[1]) && request.method === 'DELETE') {
       await env.LINKS.delete(`link:${deletion[1]}`);
       return json({ ok: true });
     }
