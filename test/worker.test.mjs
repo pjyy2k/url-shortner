@@ -17,7 +17,11 @@ function setup() {
         return { keys: keys.slice(offset, offset + limit).map(([name, value]) => ({ name, metadata: value.metadata })), list_complete: offset + limit >= keys.length, cursor: String(offset + limit) };
       },
     },
-    ASSETS: { async fetch() { return new Response('<html>Login</html>', { headers: { 'Content-Type': 'text/html' } }); } },
+    ASSETS: { async fetch(request) {
+      // Match Workers Assets' canonical HTML handling, not a generic file server.
+      if (new URL(request.url).pathname === '/index.html') return new Response(null, { status: 307, headers: { Location: '/' } });
+      return new Response('<html>Login</html>', { headers: { 'Content-Type': 'text/html' } });
+    } },
   };
   const request = (path, { authenticated = true, method = 'GET', body, headers = {} } = {}) => worker.fetch(new Request(`https://short.example${path}`, { method, headers: { ...(authenticated ? { Authorization: `Bearer ${TOKEN}` } : {}), ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}), ...headers }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) }), env);
   const create = (body = { url: 'https://example.org/path?q=한글' }) => request('/api/links', { method: 'POST', body });
