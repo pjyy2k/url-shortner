@@ -1,10 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import worker from '../src/index.ts';
-import { sessionCookie } from '../src/auth.ts';
+import { sessionCookie, createCredentials } from '../src/auth.ts';
 const PASSWORD = 'initial-password-for-tests';
+const initialCredentials = await createCredentials(PASSWORD);
 function setup() {
-  const store = new Map(); let lists = 0;
+  const store = new Map([['auth:credentials', { value: JSON.stringify(initialCredentials) }]]); let lists = 0;
   const env = { ADMIN_PASSWORD: PASSWORD, LINKS: {
     async get(key) { return store.has(key) ? JSON.parse(store.get(key).value) : null; },
     async put(key, value, options = {}) { store.set(key, { value, ...options }); },
@@ -52,7 +53,7 @@ test('password change requires authenticated current password, validates length 
   assert.equal((await s.request('/api/auth/password',{method:'POST',cookie,body:{...body,newPassword:'short'}})).status,400);
   assert.equal((await s.request('/api/auth/password',{method:'POST',cookie,body:{...body,newPassword:PASSWORD}})).status,400);
   assert.equal((await s.request('/api/auth/password',{method:'POST',cookie,body,origin:'https://evil.example'})).status,403);
-  assert.equal(s.store.has('auth:credentials'),false);
+  assert.equal(s.store.get('auth:credentials').value,JSON.stringify(initialCredentials));
 });
 test('tampered, expired and cross-host cookies are rejected', async () => {
   const s=setup();const {cookie}=await s.login();
@@ -61,7 +62,7 @@ test('tampered, expired and cross-host cookies are rejected', async () => {
   const foreign=await worker.fetch(new Request('https://other.example/api/auth/session',{headers:{Cookie:cookie}}),s.env);assert.equal(foreign.status,401);
   const original=Date.now;
   let expired;
-  try { Date.now=()=>original()-8*24*3600*1000; expired=await sessionCookie(new Request('https://short.example/'),s.env,null); }
+  try { Date.now=()=>original()-8*24*3600*1000; expired=await sessionCookie(new Request('https://short.example/'),s.env,initialCredentials); }
   finally {Date.now=original;}
   assert.equal((await s.request('/api/auth/session',{cookie:expired.split(';')[0]})).status,401);
 });

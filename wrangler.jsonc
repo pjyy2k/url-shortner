@@ -28,6 +28,35 @@
         "limit": 10,
         "period": 60
       }
+    },
+    {
+      "name": "GUEST_RATE_LIMITER",
+      "namespace_id": "2026102020",
+      "simple": {
+        "limit": 10,
+        "period": 60
+      }
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "SETUP_GATE",
+        "class_name": "SetupGate"
+      },
+      {
+        "name": "GUEST_QUOTA",
+        "class_name": "GuestQuota"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "SetupGate",
+        "GuestQuota"
+      ]
     }
   ]
 }

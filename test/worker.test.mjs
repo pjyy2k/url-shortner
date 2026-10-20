@@ -1,9 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import worker from '../src/index.ts';
-const TOKEN = 'test-only-random-admin-token-with-more-than-32-characters';
+import { createCredentials, sessionCookie } from '../src/auth.ts';
+const TOKEN = 'test-only-password';
+const initialCredentials = await createCredentials(TOKEN);
+const session = (await sessionCookie(new Request('https://short.example'), {}, initialCredentials)).split(';')[0];
 function setup() {
-  const store = new Map();
+  const store = new Map([['auth:credentials', { value: JSON.stringify(initialCredentials) }]]);
   let reads = 0;
   const env = {
     ADMIN_TOKEN: TOKEN,
@@ -23,7 +26,7 @@ function setup() {
       return new Response('<html>Login</html>', { headers: { 'Content-Type': 'text/html' } });
     } },
   };
-  const request = (path, { authenticated = true, method = 'GET', body, headers = {} } = {}) => worker.fetch(new Request(`https://short.example${path}`, { method, headers: { ...(authenticated ? { Authorization: `Bearer ${TOKEN}` } : {}), ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}), ...headers }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) }), env);
+  const request = (path, { authenticated = true, method = 'GET', body, headers = {} } = {}) => worker.fetch(new Request(`https://short.example${path}`, { method, headers: { ...(authenticated ? { Cookie: session } : {}), ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}), ...headers }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) }), env);
   const create = (body = { url: 'https://example.org/path?q=한글' }) => request('/api/links', { method: 'POST', body });
   return { env, store, request, create, reads: () => reads };
 }
@@ -32,21 +35,19 @@ test('anonymous users cannot read, create, or delete links', async () => {
   for (const [path, method] of [['/api/links','GET'],['/api/links','POST'],['/api/links/abcdefghijklmnop','DELETE']]) {
     assert.equal((await s.request(path, { method, authenticated: false })).status, 401);
   }
-  assert.equal(s.store.size, 0); assert.equal(s.reads(), 3);
+  assert.equal(s.store.size, 1); assert.equal(s.reads(), 3);
 });
-test('wrong or unconfigured token fails closed', async () => {
+test('invalid cookie fails closed; unconfigured credentials require first setup', async () => {
   const s = setup();
-  assert.equal((await s.request('/api/links', { headers: { Authorization: 'Bearer wrong' } })).status, 401);
-  for (const invalid of [undefined, '', 'short', 'a'.repeat(257), 'a'.repeat(32) + '\n']) {
-    s.env.ADMIN_TOKEN = invalid;
-    assert.equal((await s.request('/api/links')).status, 503);
-  }
+  assert.equal((await s.request('/api/links', { headers: { Cookie: 'bad' } })).status, 401);
+  s.store.delete('auth:credentials');
+  assert.equal((await s.request('/api/links')).status, 409);
 });
 test('create → anonymous redirect → list → delete → not found', async () => {
   const s = setup(); const response = await s.create(); assert.equal(response.status, 201);
   const link = await response.json(); assert.match(link.code, /^[A-Za-z0-9_-]{16}$/);
-  assert.equal(s.store.size, 1);
-  assert.ok(Buffer.byteLength(JSON.stringify([...s.store.values()][0].metadata)) < 1024);
+  assert.equal(s.store.size, 2);
+  assert.ok(Buffer.byteLength(JSON.stringify(s.store.get(`link:${link.code}`).metadata)) < 1024);
   const redirect = await s.request(`/${link.code}`, { authenticated: false });
   assert.equal(redirect.status, 302); assert.equal(redirect.headers.get('Location'), new URL('https://example.org/path?q=한글').href);
   assert.equal(redirect.headers.get('Cache-Control'), 'no-store');
@@ -70,20 +71,20 @@ test('invalid URL, self loop, credentials, and unsafe schemes rejected', async (
   for (const url of ['javascript:alert(1)', 'data:text/plain,hi', 'ftp://example.org', '/relative', 'https://short.example/admin', 'https://short.example:8080/foo', 'https://user:password@example.org', 'not a URL', 'https://example.org/' + 'a'.repeat(4096)]) {
     assert.equal((await s.create({ url })).status, 400, url.slice(0, 70));
   }
-  assert.equal(s.store.size, 0);
+  assert.equal(s.store.size, 1);
 });
 test('invalid expiry rejected; absent expiry remains permanent', async () => {
   const s = setup();
   for (const expiresAt of ['bad', 123, new Date(Date.now() - 1000).toISOString(), new Date(Date.now() + 10000).toISOString()]) assert.equal((await s.create({ url: 'https://example.org', expiresAt })).status, 400);
-  assert.equal((await s.create()).status, 201); assert.equal([...s.store.values()][0].expiration, undefined);
+  assert.equal((await s.create()).status, 201); assert.equal([...s.store.values()].find(v => v.metadata)?.expiration, undefined);
 });
 test('cross-origin mutations, malformed JSON, and oversized bodies rejected', async () => {
   const s = setup();
   assert.equal((await s.request('/api/links', { method: 'POST', body: { url: 'https://example.org' }, headers: { Origin: 'https://evil.example' } })).status, 403);
   assert.equal((await s.request('/api/links', { method: 'POST', body: { url: 'https://example.org' }, headers: { 'Content-Type': 'text/plain' } })).status, 415);
   assert.equal((await s.request('/api/links', { method: 'POST', body: { url: 'https://example.org', padding: 'a'.repeat(9000) } })).status, 400);
-  const bad = new Request('https://short.example/api/links', { method: 'POST', headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' }, body: '{bad' });
-  assert.equal((await worker.fetch(bad, s.env)).status, 400); assert.equal(s.store.size, 0);
+  const bad = new Request('https://short.example/api/links', { method: 'POST', headers: { Cookie: session, 'Content-Type': 'application/json' }, body: '{bad' });
+  assert.equal((await worker.fetch(bad, s.env)).status, 400); assert.equal(s.store.size, 1);
 });
 test('pagination covers all records, not limited to the first page', async () => {
   const s = setup();

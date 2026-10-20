@@ -2,7 +2,7 @@ interface AuthKV {
   get(key: string, type: 'json'): Promise<unknown>;
   put(key: string, value: string): Promise<void>;
 }
-export interface AuthEnv { LINKS: AuthKV; ADMIN_PASSWORD?: string; ADMIN_TOKEN?: string }
+export interface AuthEnv { LINKS: AuthKV }
 export interface Credentials { salt: string; hash: string; sessionKey: string; iterations: number }
 export const AUTH_KEY = 'auth:credentials';
 const AGE = 7 * 24 * 60 * 60;
@@ -16,10 +16,6 @@ async function equal(a: string, b: string) {
   let difference = 0; for (let i = 0; i < x.length; i++) difference |= x.charCodeAt(i) ^ y.charCodeAt(i);
   return difference === 0;
 }
-export function initialPassword(env: AuthEnv) {
-  const value = env.ADMIN_PASSWORD || env.ADMIN_TOKEN;
-  return value && value.length >= 10 && value.length <= 256 && !/[\r\n\x00]/.test(value) ? value : null;
-}
 export async function credentials(env: AuthEnv): Promise<Credentials | null> {
   const stored = await env.LINKS.get(AUTH_KEY, 'json') as Credentials | null;
   if (stored && (!/^[a-f0-9]{32}$/.test(stored.salt) || !/^[a-f0-9]{64}$/.test(stored.hash) || !/^[a-f0-9]{64}$/.test(stored.sessionKey) || stored.iterations !== 100000)) throw new Error('Invalid credentials configuration');
@@ -32,17 +28,21 @@ async function passwordHash(password: string, salt: string, iterations: number) 
 export async function checkPassword(password: unknown, env: AuthEnv, stored: Credentials | null) {
   if (typeof password !== 'string' || password.length > 256) return false;
   if (stored) return equal(await passwordHash(password, stored.salt, stored.iterations), stored.hash);
-  const initial = initialPassword(env);
-  return initial ? equal(password, initial) : false;
+  return false;
 }
-export async function changePassword(password: string, env: AuthEnv) {
+export async function createCredentials(password: string) {
   const salt = random(16);
   const stored: Credentials = { salt, hash: await passwordHash(password, salt, 100000), sessionKey: random(32), iterations: 100000 };
+  return stored;
+}
+export async function changePassword(password: string, env: AuthEnv) {
+  const stored = await createCredentials(password);
   await env.LINKS.put(AUTH_KEY, JSON.stringify(stored));
   return stored;
 }
 async function signingKey(env: AuthEnv, stored: Credentials | null) {
-  const secret = stored?.sessionKey || await digest(`shortner-initial-session:${initialPassword(env) || ''}`);
+  if (!stored) throw new Error('Password is not configured');
+  const secret = stored.sessionKey;
   return crypto.subtle.importKey('raw', unhex(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign','verify']);
 }
 function cookieName(request: Request) { return new URL(request.url).protocol === 'https:' ? '__Host-shortner_session' : 'shortner_session'; }
@@ -54,7 +54,7 @@ export async function sessionCookie(request: Request, env: AuthEnv, stored: Cred
   return `${cookieName(request)}=${payload}.${signature}; Max-Age=${AGE}; ${cookieAttributes(request)}`;
 }
 export async function validSession(request: Request, env: AuthEnv, stored: Credentials | null) {
-  if (!stored && !initialPassword(env)) return false;
+  if (!stored) return false;
   const cookies = (request.headers.get('Cookie') || '').split(';').map(s=>s.trim());
   const value = cookies.find(s=>s.startsWith(`${cookieName(request)}=`))?.slice(cookieName(request).length+1);
   if (!value || !/^\d{10}\.[a-f0-9]{32}\.[a-f0-9]{64}$/.test(value)) return false;
@@ -62,11 +62,6 @@ export async function validSession(request: Request, env: AuthEnv, stored: Crede
   const now = Math.floor(Date.now()/1000);
   if (Number(expires) <= now || Number(expires) > now + AGE) return false;
   return crypto.subtle.verify('HMAC', await signingKey(env, stored), unhex(signature), encoder.encode(`${new URL(request.url).origin}\n${expires}.${nonce}`));
-}
-// Legacy API tokens only work before a password is saved; changing the password disables them.
-export async function validLegacyToken(request: Request, env: AuthEnv, stored: Credentials | null) {
-  const value = request.headers.get('Authorization');
-  return !stored && !!env.ADMIN_TOKEN && env.ADMIN_TOKEN.length >= 32 && env.ADMIN_TOKEN.length <= 256 && !/\s/.test(env.ADMIN_TOKEN) && !!value && value.length <= 512 && await equal(value, `Bearer ${env.ADMIN_TOKEN}`);
 }
 export async function apiKeyHash(value: string) { return digest(value); }
 export function newApiKey() { return `usk_${random(32)}`; }

@@ -1,12 +1,14 @@
-import { credentials, initialPassword, checkPassword, changePassword, sessionCookie, validSession, validLegacyToken, clearCookie, newApiKey, apiKeyHash, validApiKey } from './auth.ts';
-interface Link { url: string; createdAt: string; expiresAt: number | null }
+import { credentials, checkPassword, changePassword, sessionCookie, validSession, clearCookie, newApiKey, apiKeyHash, validApiKey } from './auth.ts';
+export { SetupGate } from './setup.ts';
+export { GuestQuota } from './guest.ts';
+interface Link { url: string; createdAt: string; expiresAt: number | null; createdBy?: 'guest' | 'admin' }
 interface KV {
   get<T = Link>(key: string, type: 'json'): Promise<T | null>;
   put(key: string, value: string, options?: { metadata?: unknown; expiration?: number }): Promise<void>;
   delete(key: string): Promise<void>;
   list<T = Omit<Link, 'url'>>(options: { prefix: string; limit: number; cursor?: string }): Promise<{ keys: { name: string; metadata?: T }[]; list_complete: boolean; cursor?: string }>;
 }
-interface Env { LINKS: KV; ADMIN_TOKEN?: string; ADMIN_PASSWORD?: string; LOGIN_RATE_LIMITER?: { limit(options: { key: string }): Promise<{ success: boolean }> }; ASSETS: { fetch(request: Request): Promise<Response> } }
+interface Env { LINKS: KV; GUEST_QUOTA?: { idFromName(name: string): unknown; get(id: unknown): { fetch(request: Request): Promise<Response> } }; SETUP_GATE?: { idFromName(name: string): unknown; get(id: unknown): { fetch(request: Request): Promise<Response> } }; GUEST_RATE_LIMITER?: { limit(options: { key: string }): Promise<{ success: boolean }> }; LOGIN_RATE_LIMITER?: { limit(options: { key: string }): Promise<{ success: boolean }> }; ASSETS: { fetch(request: Request): Promise<Response> } }
 const CODE = /^[A-Za-z0-9_-]{16}$/;
 const SECURITY = {
   'Cache-Control': 'no-store',
@@ -53,20 +55,49 @@ async function handle(request: Request, env: Env): Promise<Response> {
   if (path === '/api' || path.startsWith('/api/')) {
     const mutation = !['GET', 'HEAD'].includes(request.method);
     if (mutation && request.headers.get('Origin') && request.headers.get('Origin') !== url.origin) return json({ error: '허용되지 않은 요청입니다.' }, 403);
+    if (path === '/api/guest/links') {
+      if (request.method !== 'POST') return json({ error: '게스트는 링크 생성만 가능합니다.' }, 405, { Allow: 'POST' });
+      if (env.GUEST_RATE_LIMITER) {
+        const limit = await env.GUEST_RATE_LIMITER.limit({ key: `url-shortner-guest:${request.headers.get('CF-Connecting-IP') || 'unknown'}` });
+        if (!limit.success) return json({ error: '생성 요청이 많습니다. 1분 후 다시 시도하세요.' }, 429, { 'Retry-After': '60' });
+      }
+      if (!(request.headers.get('Content-Type') || '').toLowerCase().startsWith('application/json')) return json({ error: 'JSON 요청이 필요합니다.' }, 415);
+      let body;
+      try { body = await readBody(request); } catch { return json({ error: '요청 형식이 잘못되었거나 너무 큽니다.' }, 400); }
+      const target = safeTarget(body?.url, url);
+      if (!target) return json({ error: '유효한 외부 HTTP/HTTPS URL을 입력하세요.' }, 400);
+      if (!env.GUEST_QUOTA) return json({ error: '게스트 생성 기능을 배포해 주세요.' }, 503);
+      const quota = env.GUEST_QUOTA.get(env.GUEST_QUOTA.idFromName('all-guests-global-daily'));
+      // Only the normalized URL reaches the quota gate; callers cannot override expiry or role.
+      const result = await quota.fetch(new Request('https://quota.internal/', { method: 'POST', body: JSON.stringify({ url: target }) }));
+      return json(await result.json(), result.status);
+    }
     if (path === '/api/auth/logout' && request.method === 'POST') return json({ ok: true }, 200, { 'Set-Cookie': clearCookie(request) });
-    if (path === '/api/auth/login' && request.method === 'POST' && env.LOGIN_RATE_LIMITER) {
+    if (['/api/auth/login', '/api/auth/setup'].includes(path) && request.method === 'POST' && env.LOGIN_RATE_LIMITER) {
       const limit = await env.LOGIN_RATE_LIMITER.limit({ key: `url-shortner-login:${request.headers.get('CF-Connecting-IP') || 'unknown'}` });
       if (!limit.success) return json({ error: '로그인 시도가 많습니다. 1분 후 다시 시도하세요.' }, 429, { 'Retry-After': '60' });
     }
     const stored = await credentials(env);
-    if (!stored && !initialPassword(env)) return json({ error: 'Cloudflare에서 ADMIN_PASSWORD를 10~256자로 설정하세요.' }, 503);
+    if (path === '/api/auth/session' && request.method === 'GET' && !stored) return json({ setupRequired: true });
+    if (path === '/api/auth/setup' && request.method === 'POST') {
+      if (stored) return json({ error: '이미 관리자 비밀번호가 설정되어 있습니다.' }, 409);
+      if (!env.SETUP_GATE) return json({ error: '최초 설정 기능을 배포해 주세요.' }, 503);
+      let body;
+      try { body = await readBody(request); } catch { return json({ error: '잘못된 요청입니다.' }, 400); }
+      const password = body?.password;
+      if (typeof password !== 'string' || password.length < 10 || password.length > 128 || /[\r\n\x00]/.test(password)) return json({ error: '비밀번호는 10~128자로 입력하세요.' }, 400);
+      const gate = env.SETUP_GATE.get(env.SETUP_GATE.idFromName('administrator-first-setup'));
+      const result = await gate.fetch(new Request('https://setup.internal/', { method: 'POST', body: JSON.stringify({ password }) }));
+      return json(await result.json(), result.status);
+    }
+    if (!stored) return json({ error: '먼저 관리자 비밀번호를 설정하세요.', setupRequired: true }, 409);
     if (path === '/api/auth/login' && request.method === 'POST') {
       let body;
       try { body = await readBody(request); } catch { return json({ error: '잘못된 요청입니다.' }, 400); }
       if (!await checkPassword(body?.password, env, stored)) return json({ error: '비밀번호가 올바르지 않습니다.' }, 401);
       return json({ ok: true, passwordChanged: !!stored }, 200, { 'Set-Cookie': await sessionCookie(request, env, stored) });
     }
-    const admin = await validSession(request, env, stored) || await validLegacyToken(request, env, stored);
+    const admin = await validSession(request, env, stored);
     const authenticated = admin || ((path === '/api/links' || path.startsWith('/api/links/')) && await validApiKey(request, env));
     if (!authenticated) return json({ error: '관리자 로그인이 필요합니다.' }, 401);
     if (path === '/api/auth/session' && request.method === 'GET') return json({ ok: true, passwordChanged: !!stored });
@@ -121,7 +152,7 @@ async function handle(request: Request, env: Env): Promise<Response> {
         expiresAt = Math.floor(parsed / 1000);
         if (!Number.isFinite(expiresAt) || expiresAt < Math.floor(Date.now() / 1000) + 60) return json({ error: '만료일은 현재보다 1분 이상 이후여야 합니다.' }, 400);
       }
-      const link: Link = { url: target, createdAt: new Date().toISOString(), expiresAt };
+      const link: Link = { url: target, createdAt: new Date().toISOString(), expiresAt, createdBy: 'admin' };
       // 96 random bits: no shared sequence or read-then-write uniqueness assumption.
       const code = newCode();
       await env.LINKS.put(`link:${code}`, JSON.stringify(link), { metadata: { createdAt: link.createdAt, expiresAt }, ...(expiresAt ? { expiration: expiresAt } : {}) });

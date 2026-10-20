@@ -1,3 +1,1 @@
-# Copy to .dev.vars and set your own initial administrator password (10–256 characters).
-# After login, change it in the administrator page; the new hash is stored in KV.
-ADMIN_PASSWORD="replace-with-your-own-initial-password"
+# No Worker Secret is required. Open /admin and set the first administrator password.

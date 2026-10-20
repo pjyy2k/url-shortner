@@ -4,22 +4,39 @@ let cursor = null;
 let revision = 0;
 let loading = false;
 let resultURL = '';
+let setupRequired = false;
+const adminPage = ['/admin', '/admin/'].includes(location.pathname);
+let guestResultURL = '';
 let apiKeys = [];
 let keyCursor = null;
 let keysLoading = false;
 function notice(message, error = false) { $('notice').textContent = message; $('notice').classList.toggle('error', error); }
+function setSetupMode(required) {
+  setupRequired = required;
+  $('login-title').textContent = required ? '관리자 비밀번호 설정' : '관리자 로그인';
+  $('login-submit').textContent = required ? '비밀번호 설정 →' : '로그인 →';
+  $('setup-confirm').hidden = !required;
+  $('setup-confirm-password').required = required;
+  $('password').autocomplete = required ? 'new-password' : 'current-password';
+  $('password').minLength = required ? 10 : 1;
+  $('password').maxLength = required ? 128 : 256;
+  $('login-hint').textContent = required ? '최초 한 번만 설정합니다. 10자 이상의 비밀번호를 입력하세요.' : '로그인은 최대 7일 유지됩니다. 공용 기기에서는 사용 후 로그아웃하세요.';
+}
 function showLogin() {
   revision++; records = []; cursor = null; loading = false; resultURL = '';
   $('api-settings').hidden = true; $('api-panel').hidden = true; $('key-result').hidden = true; $('new-api-key').value = ''; $('api-keys').replaceChildren(); $('create-api-key').reset(); apiKeys = []; keyCursor = null;
   $('password-settings').hidden = true; $('password-panel').hidden = true; $('change-password').reset();
   $('dashboard').hidden = true; $('login-panel').hidden = false; $('logout').hidden = true;
   $('links').replaceChildren(); $('result').hidden = true; $('result-link').removeAttribute('href'); $('result-link').textContent = '';
-  $('password').value = ''; $('create').reset(); $('search').value = ''; notice('');
+  $('password').value = ''; $('setup-confirm-password').value = ''; $('create').reset(); $('search').value = ''; notice('');
 }
 async function api(path, options = {}) {
   const response = await fetch(path, { ...options, cache: 'no-store', credentials: 'same-origin', headers: { ...(options.body ? { 'Content-Type': 'application/json' } : {}) } });
   const data = await response.json();
-  if (!response.ok) { if (response.status === 401 && path !== '/api/auth/login') showLogin(); throw new Error(data.error || '요청을 처리하지 못했습니다.'); }
+  if (!response.ok) {
+    if (path === '/api/auth/setup' && response.status === 409) setSetupMode(false);
+    if (data.setupRequired) setSetupMode(true);
+    if (response.status === 401 && path !== '/api/auth/login') showLogin(); throw new Error(data.error || '요청을 처리하지 못했습니다.'); }
   return data;
 }
 function shortURL(code) { return `${location.origin}/${code}`; }
@@ -34,7 +51,7 @@ function render() {
     const content = document.createElement('div'); content.className = 'link-content';
     const link = document.createElement('a'); link.href = shortURL(record.code); link.textContent = shortURL(record.code); link.target = '_blank'; link.rel = 'noopener noreferrer';
     const original = document.createElement('p'); original.className = 'original'; original.textContent = record.url; original.title = record.url;
-    const meta = document.createElement('small'); meta.textContent = `생성 ${new Date(record.createdAt).toLocaleString('ko-KR')} · ${record.expiresAt ? `만료 ${new Date(record.expiresAt * 1000).toLocaleString('ko-KR')}` : '무기한'}`;
+    const meta = document.createElement('small'); meta.textContent = `생성 ${new Date(record.createdAt).toLocaleString('ko-KR')} · ${record.createdBy === 'guest' ? '게스트 · ' : ''}${record.expiresAt ? `만료 ${new Date(record.expiresAt * 1000).toLocaleString('ko-KR')}` : '무기한'}`;
     content.append(link, original, meta);
     const actions = document.createElement('div'); actions.className = 'actions';
     const copyButton = document.createElement('button'); copyButton.className = 'quiet'; copyButton.textContent = '복사'; copyButton.onclick = () => copy(shortURL(record.code));
@@ -70,6 +87,13 @@ function showDashboard() {
 $('login').onsubmit = async event => {
   event.preventDefault(); const button = event.submitter; button.disabled = true; notice('로그인 중…');
   try {
+    if (setupRequired) {
+      if ($('password').value !== $('setup-confirm-password').value) throw new Error('비밀번호 확인이 일치하지 않습니다.');
+      await api('/api/auth/setup', { method: 'POST', body: JSON.stringify({ password: $('password').value }) });
+      $('password').value = ''; $('setup-confirm-password').value = ''; setSetupMode(false);
+      notice('관리자 비밀번호를 설정했습니다. 로그인하세요. 바로 로그인되지 않으면 1분 정도 후 다시 시도하세요.');
+      return;
+    }
     await api('/api/auth/login', { method: 'POST', body: JSON.stringify({ password: $('password').value }) });
     $('password').value = ''; showDashboard(); await load(true); notice('');
   } catch (e) { notice(e.message, true); }
@@ -108,7 +132,7 @@ $('more').onclick = () => load().catch(e => notice(e.message, true));
 
 async function restoreSession() {
   const button = $('login').querySelector('button[type="submit"]'); button.disabled = true;
-  try { await api('/api/auth/session'); showDashboard(); await load(true); }
+  try { const session = await api('/api/auth/session'); setSetupMode(!!session.setupRequired); if (session.setupRequired) return; showDashboard(); await load(true); }
   catch (e) { if (e.message !== '관리자 로그인이 필요합니다.') notice(e.message, true); }
   finally { button.disabled = false; }
 }
@@ -168,4 +192,15 @@ $('create-api-key').onsubmit = async event => {
 $('copy-api-key').onclick = () => copy($('new-api-key').value, 'API 키');
 $('more-keys').onclick = () => loadKeys().catch(e => notice(e.message,true));
 
-restoreSession();
+$('guest-create').onsubmit = async event => {
+  event.preventDefault(); const button = event.submitter; button.disabled = true;
+  try {
+    const created = await api('/api/guest/links', { method: 'POST', body: JSON.stringify({ url: $('guest-url').value.trim() }) });
+    guestResultURL = shortURL(created.code); $('guest-result-link').href = guestResultURL; $('guest-result-link').textContent = guestResultURL;
+    $('guest-expiry').textContent = `만료: ${new Date(created.expiresAt * 1000).toLocaleString('ko-KR')}`;
+    $('guest-result').hidden = false; $('guest-create').reset(); notice('7일 동안 사용할 수 있는 링크를 만들었습니다.');
+  } catch (e) { notice(e.message, true); } finally { button.disabled = false; }
+};
+$('copy-guest').onclick = () => copy(guestResultURL);
+if (adminPage) { $('admin-link').hidden = true; $('login-panel').hidden = false; restoreSession(); }
+else { $('guest-panel').hidden = false; }
