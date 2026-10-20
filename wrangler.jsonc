@@ -19,5 +19,15 @@
       "pattern": "go.hellojyp.com",
       "custom_domain": true
     }
+  ],
+  "ratelimits": [
+    {
+      "name": "LOGIN_RATE_LIMITER",
+      "namespace_id": "2026102019",
+      "simple": {
+        "limit": 10,
+        "period": 60
+      }
+    }
   ]
 }

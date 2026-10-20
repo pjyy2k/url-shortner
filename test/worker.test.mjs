@@ -32,7 +32,7 @@ test('anonymous users cannot read, create, or delete links', async () => {
   for (const [path, method] of [['/api/links','GET'],['/api/links','POST'],['/api/links/abcdefghijklmnop','DELETE']]) {
     assert.equal((await s.request(path, { method, authenticated: false })).status, 401);
   }
-  assert.equal(s.store.size, 0); assert.equal(s.reads(), 0);
+  assert.equal(s.store.size, 0); assert.equal(s.reads(), 3);
 });
 test('wrong or unconfigured token fails closed', async () => {
   const s = setup();

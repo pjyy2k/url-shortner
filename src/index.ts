@@ -1,11 +1,12 @@
+import { credentials, initialPassword, checkPassword, changePassword, sessionCookie, validSession, validLegacyToken, clearCookie, newApiKey, apiKeyHash, validApiKey } from './auth.ts';
 interface Link { url: string; createdAt: string; expiresAt: number | null }
 interface KV {
-  get(key: string, type: 'json'): Promise<Link | null>;
-  put(key: string, value: string, options: { metadata: Omit<Link, 'url'>; expiration?: number }): Promise<void>;
+  get<T = Link>(key: string, type: 'json'): Promise<T | null>;
+  put(key: string, value: string, options?: { metadata?: unknown; expiration?: number }): Promise<void>;
   delete(key: string): Promise<void>;
-  list(options: { prefix: string; limit: number; cursor?: string }): Promise<{ keys: { name: string; metadata?: Omit<Link, 'url'> }[]; list_complete: boolean; cursor?: string }>;
+  list<T = Omit<Link, 'url'>>(options: { prefix: string; limit: number; cursor?: string }): Promise<{ keys: { name: string; metadata?: T }[]; list_complete: boolean; cursor?: string }>;
 }
-interface Env { LINKS: KV; ADMIN_TOKEN?: string; ASSETS: { fetch(request: Request): Promise<Response> } }
+interface Env { LINKS: KV; ADMIN_TOKEN?: string; ADMIN_PASSWORD?: string; LOGIN_RATE_LIMITER?: { limit(options: { key: string }): Promise<{ success: boolean }> }; ASSETS: { fetch(request: Request): Promise<Response> } }
 const CODE = /^[A-Za-z0-9_-]{16}$/;
 const SECURITY = {
   'Cache-Control': 'no-store',
@@ -14,17 +15,8 @@ const SECURITY = {
   'X-Frame-Options': 'DENY',
   'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
 };
-function json(data: unknown, status = 200) {
-  return new Response(JSON.stringify(data), { status, headers: { ...SECURITY, 'Content-Type': 'application/json; charset=utf-8' } });
-}
-async function authorized(request: Request, token: string) {
-  const supplied = request.headers.get('Authorization') || '';
-  if (supplied.length > 512) return false;
-  const hash = async (s: string) => new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s)));
-  const [a, b] = await Promise.all([hash(supplied), hash(`Bearer ${token}`)]);
-  let difference = 0;
-  for (let i = 0; i < a.length; i++) difference |= a[i] ^ b[i];
-  return difference === 0;
+function json(data: unknown, status = 200, headers: Record<string, string> = {}) {
+  return new Response(JSON.stringify(data), { status, headers: { ...SECURITY, 'Content-Type': 'application/json; charset=utf-8', ...headers } });
 }
 async function readBody(request: Request) {
   const reader = request.body?.getReader();
@@ -59,9 +51,56 @@ async function handle(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   const path = url.pathname;
   if (path === '/api' || path.startsWith('/api/')) {
-    if (!env.ADMIN_TOKEN || env.ADMIN_TOKEN.length < 32 || env.ADMIN_TOKEN.length > 256 || /[\s]/.test(env.ADMIN_TOKEN)) return json({ error: '관리자 토큰 설정을 확인하세요.' }, 503);
-    if (!await authorized(request, env.ADMIN_TOKEN)) return json({ error: '관리자 인증이 필요합니다.' }, 401);
-    if (!['GET', 'HEAD'].includes(request.method) && request.headers.get('Origin') && request.headers.get('Origin') !== url.origin) return json({ error: '허용되지 않은 요청입니다.' }, 403);
+    const mutation = !['GET', 'HEAD'].includes(request.method);
+    if (mutation && request.headers.get('Origin') && request.headers.get('Origin') !== url.origin) return json({ error: '허용되지 않은 요청입니다.' }, 403);
+    if (path === '/api/auth/logout' && request.method === 'POST') return json({ ok: true }, 200, { 'Set-Cookie': clearCookie(request) });
+    if (path === '/api/auth/login' && request.method === 'POST' && env.LOGIN_RATE_LIMITER) {
+      const limit = await env.LOGIN_RATE_LIMITER.limit({ key: `url-shortner-login:${request.headers.get('CF-Connecting-IP') || 'unknown'}` });
+      if (!limit.success) return json({ error: '로그인 시도가 많습니다. 1분 후 다시 시도하세요.' }, 429, { 'Retry-After': '60' });
+    }
+    const stored = await credentials(env);
+    if (!stored && !initialPassword(env)) return json({ error: 'Cloudflare에서 ADMIN_PASSWORD를 10~256자로 설정하세요.' }, 503);
+    if (path === '/api/auth/login' && request.method === 'POST') {
+      let body;
+      try { body = await readBody(request); } catch { return json({ error: '잘못된 요청입니다.' }, 400); }
+      if (!await checkPassword(body?.password, env, stored)) return json({ error: '비밀번호가 올바르지 않습니다.' }, 401);
+      return json({ ok: true, passwordChanged: !!stored }, 200, { 'Set-Cookie': await sessionCookie(request, env, stored) });
+    }
+    const admin = await validSession(request, env, stored) || await validLegacyToken(request, env, stored);
+    const authenticated = admin || ((path === '/api/links' || path.startsWith('/api/links/')) && await validApiKey(request, env));
+    if (!authenticated) return json({ error: '관리자 로그인이 필요합니다.' }, 401);
+    if (path === '/api/auth/session' && request.method === 'GET') return json({ ok: true, passwordChanged: !!stored });
+    if (path === '/api/auth/password' && request.method === 'POST') {
+      let body;
+      try { body = await readBody(request); } catch { return json({ error: '잘못된 요청입니다.' }, 400); }
+      if (!await checkPassword(body?.currentPassword, env, stored)) return json({ error: '현재 비밀번호가 올바르지 않습니다.' }, 400);
+      const next = body?.newPassword;
+      if (typeof next !== 'string' || next.length < 10 || next.length > 128 || /[\r\n\x00]/.test(next)) return json({ error: '새 비밀번호는 10~128자로 입력하세요.' }, 400);
+      if (await checkPassword(next, env, stored)) return json({ error: '현재와 다른 비밀번호를 입력하세요.' }, 400);
+      await changePassword(next, env);
+      return json({ ok: true }, 200, { 'Set-Cookie': clearCookie(request) });
+    }
+    if (path === '/api/keys' && request.method === 'GET') {
+      const cursor = url.searchParams.get('cursor') || undefined;
+      if (cursor && cursor.length > 2048) return json({ error: '잘못된 페이지입니다.' }, 400);
+      const page = await env.LINKS.list<{ name: string; createdAt: string }>({ prefix: 'apikey:', limit: 50, cursor });
+      return json({ keys: page.keys.map(k => ({ id: k.name.slice(7), ...k.metadata })), cursor: page.list_complete ? null : page.cursor });
+    }
+    if (path === '/api/keys' && request.method === 'POST') {
+      let body;
+      try { body = await readBody(request); } catch { return json({ error: '잘못된 요청입니다.' }, 400); }
+      if (typeof body?.name !== 'string' || !body.name.trim() || body.name.length > 80) return json({ error: '키 이름을 1~80자로 입력하세요.' }, 400);
+      const key = newApiKey();
+      const id = await apiKeyHash(key);
+      const metadata = { name: body.name.trim(), createdAt: new Date().toISOString() };
+      await env.LINKS.put(`apikey:${id}`, JSON.stringify({ version: 1, ...metadata }), { metadata });
+      return json({ key, id, ...metadata }, 201);
+    }
+    const keyDeletion = path.match(/^\/api\/keys\/([a-f0-9]{64})$/);
+    if (keyDeletion && request.method === 'DELETE') {
+      await env.LINKS.delete(`apikey:${keyDeletion[1]}`);
+      return json({ ok: true });
+    }
     if (path === '/api/links' && request.method === 'GET') {
       const cursor = url.searchParams.get('cursor') || undefined;
       if (cursor && cursor.length > 2048) return json({ error: '잘못된 페이지입니다.' }, 400);

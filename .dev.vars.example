@@ -1,2 +1,3 @@
-# Copy to .dev.vars and replace with a random token (32–256 characters, no whitespace).
-ADMIN_TOKEN="replace-with-a-long-random-admin-token-before-use"
+# Copy to .dev.vars and set your own initial administrator password (10–256 characters).
+# After login, change it in the administrator page; the new hash is stored in KV.
+ADMIN_PASSWORD="replace-with-your-own-initial-password"
