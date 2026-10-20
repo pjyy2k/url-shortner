@@ -9,6 +9,15 @@
     "run_worker_first": true
   },
   "kv_namespaces": [
-    { "binding": "LINKS", "id": "a0c2156c071b43979b871c4305f7fb8b" }
+    {
+      "binding": "LINKS",
+      "id": "a0c2156c071b43979b871c4305f7fb8b"
+    }
+  ],
+  "routes": [
+    {
+      "pattern": "go.hellojyp.com",
+      "custom_domain": true
+    }
   ]
 }
