@@ -9,6 +9,6 @@
     "run_worker_first": true
   },
   "kv_namespaces": [
-    { "binding": "LINKS", "id": "REPLACE_WITH_YOUR_KV_NAMESPACE_ID" }
+    { "binding": "LINKS", "id": "a0c2156c071b43979b871c4305f7fb8b" }
   ]
 }
