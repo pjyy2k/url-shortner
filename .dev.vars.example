@@ -1,0 +1,2 @@
+# Copy to .dev.vars and replace with a random token (32–256 characters, no whitespace).
+ADMIN_TOKEN="replace-with-a-long-random-admin-token-before-use"
